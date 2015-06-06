@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes        #-}
 {-# LANGUAGE RecordWildCards   #-}
 
 module Data.Network.JsonRpcServer where
@@ -16,6 +15,14 @@ import qualified Data.Text.Encoding             as T
 import           Network.HTTP.Types
 import           Network.Wai
 import           Network.Wai.Application.Static
+import           Network.Wai.Handler.Warp       (defaultSettings, runSettings,
+                                                 setPort)
+import           System.IO
+import           System.Log.Formatter           (simpleLogFormatter)
+import           System.Log.Handler             (setFormatter)
+import           System.Log.Handler.Simple      (fileHandler, streamHandler)
+import           System.Log.Logger              (Logger, Priority (..),
+                                                 addHandler, getLogger)
 
 data JsonRpcRequest = JsonRpcRequest
   { jrReqId     :: !Value
@@ -111,9 +118,6 @@ instance ToJSON r => ToJSON (JsonRpcResponse r) where
                       , "data"    .= errData
                       ]
 
--------------------------------------------------------------------------------
--------------------------------------------------------------------------------
-
 type JsonRPCFunc = Value -> JsonRpcResponse Value
 
 data JsonRPCRoute = JsonRPCRoute
@@ -131,6 +135,19 @@ instance Show JsonRPCRoute where
            ]
 
 type JsonRPCRouteMap = HM.HashMap (T.Text, T.Text) JsonRPCFunc
+
+data LoggerType = FileLogger FilePath | StreamLogger Handle
+
+data ServerSettings = ServerSettings
+  { ssRootFolder   :: FilePath        -- ^ root folder to server static files from
+  , ssRPCRoutes    :: [JsonRPCRoute]  -- ^ list of json rpc routes
+  , ssPort         :: Int             -- ^ port number
+  , ssTimeout      :: Int             -- ^ timeout value given in seconds
+  , ssServerLogger :: Logger          -- ^ server logger
+  }
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
 
 mkRouteMap :: [JsonRPCRoute] -> JsonRPCRouteMap
 mkRouteMap = HM.fromList . map f
@@ -157,11 +174,6 @@ jsonRPCRouterApp routeMap request respond = do
 -------------------------------------------------------------------------------
 -------------------------------------------------------------------------------
 
-data ServerSettings = ServerSettings
-  { ssRootFolder :: FilePath       -- ^ root folder to server static files from
-  , ssRPCRoutes  :: [JsonRPCRoute] -- ^ list of json rpc routes
-  } deriving (Show)
-
 serverApp :: ServerSettings -> Application
 serverApp ServerSettings{..} request respond
     -- POST, let the router app handle it
@@ -182,3 +194,25 @@ serverApp ServerSettings{..} request respond
     errorHandler :: SomeException -> IO ResponseReceived
     errorHandler _ =
       respond $ mkHTTPErrorResp status500 -- internal server error
+
+runServer :: ServerSettings -> IO ()
+runServer settings@ServerSettings{..} = do
+  runSettings warpSettings $ serverApp settings
+
+  where
+    warpSettings = setPort ssPort $ defaultSettings
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+
+defaultServerLogger :: LoggerType -> Priority -> IO Logger
+defaultServerLogger loggerType prio = do
+  handler <- case loggerType of
+    FileLogger fp   -> fileHandler fp prio
+    StreamLogger hd -> streamHandler hd prio
+
+  logger  <- getLogger "server"
+
+  let formatter = simpleLogFormatter "$time [$prio] $msg"
+
+  return $ addHandler (setFormatter handler formatter) logger
