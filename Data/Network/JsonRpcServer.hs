@@ -6,11 +6,13 @@ module Data.Network.JsonRpcServer where
 import           Control.Monad
 import           Data.Aeson
 import           Data.Aeson.Types
+import qualified Data.ByteString.Char8          as B8
 import qualified Data.ByteString.Lazy           as BL
 import qualified Data.ByteString.Lazy.Char8     as BL8
 import qualified Data.HashMap.Strict            as HM
 import qualified Data.Text                      as T
 import qualified Data.Text.Encoding             as T
+import           Data.Time.Clock                (diffUTCTime, getCurrentTime)
 import           Network.HTTP.Types
 import           Network.Wai
 import           Network.Wai.Application.Static
@@ -199,8 +201,9 @@ jsonRPCRouterApp logger routeMap request respond = do
 -------------------------------------------------------------------------------
 
 serverApp :: ServerSettings -> Application
-serverApp ServerSettings{..} request respond =
-  appDispatcher wrappedRespond
+serverApp ServerSettings{..} request respond = do
+  startTS <- getCurrentTime
+  appDispatcher $ wrappedRespond startTS
 
   where
     routerMap = mkRouteMap ssRPCRoutes
@@ -218,9 +221,27 @@ serverApp ServerSettings{..} request respond =
           staticApp staticServerSettings request respond'
       | otherwise = respond $ mkHTTPErrorResp status405 -- method not allowed
 
-    wrappedRespond response = do
-      logL ssLogger INFO "TODO access log"
+    wrappedRespond startTS response = do
+      endTS <- getCurrentTime
+
+      -- elapsed time in seconds
+      let elapsed = (floor $ diffUTCTime endTS startTS) :: Integer
+
+      -- Access log format: time elapsed remotehost status bytes method URL type
+      logL ssLogger INFO $
+        printf "%6d %10s %5d %5s %5s %10s"
+        elapsed (show $ remoteHost request)
+        (statusCode $ responseStatus response)
+        -- TODO: warp never sets the content-length header...
+        (showHeader hContentLength $ responseHeaders response)
+        (B8.unpack $ requestMethod request)
+        (B8.unpack $ rawPathInfo request)
+
       respond response
+
+    showHeader headerName headers
+      | Just header <- lookup headerName headers = B8.unpack header
+      | otherwise = "-"
 
 runServer :: ServerSettings -> IO ()
 runServer settings@ServerSettings{..} = do
