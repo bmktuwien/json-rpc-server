@@ -29,7 +29,12 @@ data JsonRpcRequest = JsonRpcRequest
   , jrReqVer    :: !Value
   , jrReqMethod :: !T.Text
   , jrReqParams :: !Value
-  } deriving (Show)
+  }
+
+instance Show JsonRpcRequest where
+  show JsonRpcRequest{..} =
+    printf "JSON RPC Request [%s]: %s %s"
+    (show jrReqId) (show jrReqMethod) (show jrReqParams)
 
 data JsonRpcResponse r =
     JsonRpcResult { jrResId     :: !Value
@@ -42,7 +47,15 @@ data JsonRpcResponse r =
                   , jrErrMessage :: !T.Text
                   , jrErrData    :: !Value
                   }
-  deriving (Show)
+
+instance Show r => Show (JsonRpcResponse r) where
+  show JsonRpcResult{..} =
+    printf "JSON RPC Result [%s]: %s"
+    (show jrResId) (show jrResResult)
+
+  show JsonRpcError{..} =
+    printf "JSON RPC Error [%s]: %s(%d) %s"
+    (show jrErrId) (show jrErrMessage) (show jrErrCode) (show jrErrData)
 
 isValidJsonRpcVer :: Value -> Bool
 isValidJsonRpcVer (String "2.0") = True
@@ -163,12 +176,16 @@ jsonRPCRouterApp logger routeMap request respond = do
      logL logger ERROR $
         printf "JSON RPC request parse error:  %s\n" err
      respond $ mkHTTPErrorResp status400
-   Right JsonRpcRequest{..} -> do
+   Right rpcReq@JsonRpcRequest{..} -> do
+     logL logger DEBUG $ show rpcReq
+
      let domain = T.decodeUtf8 $ rawPathInfo request
          response = case HM.lookup (domain,jrReqMethod) routeMap of
            Just rpcFunc -> rpcFunc jrReqParams
            Nothing      -> JsonRpcError jrReqId jrReqVer (-32601)
                            "Method not found" Null
+
+     logL logger DEBUG $ show response
 
      respond . responseLBS status200 [] $ encode response
 
@@ -215,7 +232,7 @@ runServer settings@ServerSettings{..} =
 
     onClose sockAddr =
       logL ssServerLogger DEBUG $
-        printf "Connection from %s closed.\n" (show sockAddr)
+        printf "Connection from %s closed\n" (show sockAddr)
 
     onException' (Just req) exception =
       logL ssServerLogger ERROR $
