@@ -3,8 +3,6 @@
 
 module Data.Network.JsonRpcServer where
 
-import           Control.Applicative
-import           Control.Exception
 import           Control.Monad
 import           Data.Aeson
 import           Data.Aeson.Types
@@ -16,13 +14,15 @@ import           Network.HTTP.Types
 import           Network.Wai
 import           Network.Wai.Application.Static
 import           Network.Wai.Handler.Warp       (defaultSettings, runSettings,
-                                                 setPort)
+                                                 setOnClose, setOnException,
+                                                 setOnOpen, setPort)
 import           System.IO
 import           System.Log.Formatter           (simpleLogFormatter)
 import           System.Log.Handler             (setFormatter)
 import           System.Log.Handler.Simple      (fileHandler, streamHandler)
 import           System.Log.Logger              (Logger, Priority (..),
-                                                 addHandler, getLogger)
+                                                 addHandler, getLogger, logL)
+import           Text.Printf                    (printf)
 
 data JsonRpcRequest = JsonRpcRequest
   { jrReqId     :: !Value
@@ -154,11 +154,15 @@ mkRouteMap = HM.fromList . map f
   where
     f JsonRPCRoute{..} = ((jrRouteDomain, jrRouteMethod), jrRouteFunc)
 
-jsonRPCRouterApp :: JsonRPCRouteMap -> Application
-jsonRPCRouterApp routeMap request respond = do
-  eRequest <- eitherDecode' . BL.fromStrict <$> requestBody request
-  case eRequest of
-   Left _ -> respond $ mkHTTPErrorResp status400
+jsonRPCRouterApp :: Logger -> JsonRPCRouteMap -> Application
+jsonRPCRouterApp logger routeMap request respond = do
+  reqBody  <- requestBody request
+
+  case eitherDecode' . BL.fromStrict $ reqBody of
+   Left err -> do
+     logL logger ERROR $
+        printf "JSON RPC request parse error:  %s\n" err
+     respond $ mkHTTPErrorResp status400
    Right JsonRpcRequest{..} -> do
      let domain = T.decodeUtf8 $ rawPathInfo request
          response = case HM.lookup (domain,jrReqMethod) routeMap of
@@ -177,30 +181,50 @@ jsonRPCRouterApp routeMap request respond = do
 serverApp :: ServerSettings -> Application
 serverApp ServerSettings{..} request respond
     -- POST, let the router app handle it
-  | requestMethod request == methodPost = handle errorHandler $
-      jsonRPCRouterApp routerMap request respond
+  | requestMethod request == methodPost =
+      jsonRPCRouterApp ssServerLogger routerMap request respond
     -- GET, let the static file server handle it
-  | requestMethod request == methodGet = handle errorHandler $
+  | requestMethod request == methodGet =
       staticApp staticServerSettings request respond
 
   | otherwise = respond $ mkHTTPErrorResp status405 -- method not allowed
 
   where
     routerMap = mkRouteMap ssRPCRoutes
+
     staticServerSettings = defaultFileServerSettings ssRootFolder
 
     mkHTTPErrorResp status = responseLBS status [] BL.empty
 
-    errorHandler :: SomeException -> IO ResponseReceived
-    errorHandler _ =
-      respond $ mkHTTPErrorResp status500 -- internal server error
-
 runServer :: ServerSettings -> IO ()
-runServer settings@ServerSettings{..} = do
+runServer settings@ServerSettings{..} =
   runSettings warpSettings $ serverApp settings
 
   where
-    warpSettings = setPort ssPort $ defaultSettings
+    warpSettings = setPort ssPort .
+                   setOnOpen onOpen .
+                   setOnClose onClose .
+                   setOnException onException' $
+                   defaultSettings
+
+    onOpen _ = do
+      logL ssServerLogger INFO $
+        printf "Server started listening on port %d...\n" ssPort
+
+      return True
+
+    onClose sockAddr =
+      logL ssServerLogger DEBUG $
+        printf "Connection from %s closed.\n" (show sockAddr)
+
+    onException' (Just req) exception =
+      logL ssServerLogger ERROR $
+        printf "Server error when serving the request %s: %s\n"
+        (show req) (show exception)
+
+    onException' Nothing exception =
+      logL ssServerLogger ERROR $
+        printf "Server error: %s\n" (show exception)
 
 -------------------------------------------------------------------------------
 -------------------------------------------------------------------------------
