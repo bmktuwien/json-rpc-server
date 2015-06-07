@@ -137,11 +137,11 @@ type JsonRPCRouteMap = HM.HashMap (T.Text, T.Text) JsonRPCFunc
 data LoggerType = FileLogger FilePath | StreamLogger Handle
 
 data ServerSettings = ServerSettings
-  { ssRootFolder   :: FilePath        -- ^ root folder to server static files from
-  , ssRPCRoutes    :: [JsonRPCRoute]  -- ^ list of json rpc routes
-  , ssPort         :: Int             -- ^ port number
-  , ssTimeout      :: Int             -- ^ timeout value given in seconds
-  , ssServerLogger :: Logger          -- ^ server logger
+  { ssRootFolder :: FilePath        -- ^ root folder to server static files from
+  , ssRPCRoutes  :: [JsonRPCRoute]  -- ^ list of json rpc routes
+  , ssPort       :: Int             -- ^ port number
+  , ssTimeout    :: Int             -- ^ timeout value given in seconds
+  , ssLogger     :: Logger          -- ^ server logger
   }
 
 -------------------------------------------------------------------------------
@@ -177,12 +177,12 @@ jsonRPCRouterApp logger routeMap request respond = do
 
     logRPCAction endpoint JsonRpcRequest{..} JsonRpcResult{..} =
       logL logger INFO $
-      printf "JSON RPC id=%s endpoint=%s method=%s params=%s result=%s"
+      printf "JSON RPC id=%s endpoint=%s method=%s params=%s result=%s\n"
       (show jrReqId) (show endpoint) (show jrReqMethod) (show jrResResult)
 
     logRPCAction endpoint JsonRpcRequest{..} JsonRpcError{..} =
       logL logger INFO $
-      printf "JSON RPC id=%s endpoint=%s method=%s params=%s error=(%d,%s)"
+      printf "JSON RPC id=%s endpoint=%s method=%s params=%s error=(%d,%s)\n"
       (show jrReqId) (show endpoint) (show jrReqMethod) jrErrCode
       (show jrErrMessage)
 
@@ -193,7 +193,7 @@ serverApp :: ServerSettings -> Application
 serverApp ServerSettings{..} request respond
     -- POST, let the router app handle it
   | requestMethod request == methodPost =
-      jsonRPCRouterApp ssServerLogger routerMap request respond
+      jsonRPCRouterApp ssLogger routerMap request respond
     -- GET, let the static file server handle it
   | requestMethod request == methodGet =
       staticApp staticServerSettings request respond
@@ -219,29 +219,29 @@ runServer settings@ServerSettings{..} =
                    defaultSettings
 
     onOpen _ = do
-      logL ssServerLogger INFO $
+      logL ssLogger INFO $
         printf "Server started listening on port %d...\n" ssPort
 
       return True
 
     onClose sockAddr =
-      logL ssServerLogger DEBUG $
+      logL ssLogger DEBUG $
         printf "Connection from %s closed\n" (show sockAddr)
 
     onException' (Just req) exception =
-      logL ssServerLogger ERROR $
+      logL ssLogger ERROR $
         printf "Server error when serving the request %s: %s\n"
         (show req) (show exception)
 
     onException' Nothing exception =
-      logL ssServerLogger ERROR $
+      logL ssLogger ERROR $
         printf "Server error: %s\n" (show exception)
 
 -------------------------------------------------------------------------------
 -------------------------------------------------------------------------------
 
-defaultServerLogger :: LoggerType -> Priority -> IO Logger
-defaultServerLogger loggerType prio = do
+mkLogger :: LoggerType -> Priority -> IO Logger
+mkLogger loggerType prio = do
   handler <- case loggerType of
     FileLogger fp   -> fileHandler fp prio
     StreamLogger hd -> streamHandler hd prio
