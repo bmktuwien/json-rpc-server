@@ -199,15 +199,8 @@ jsonRPCRouterApp logger routeMap request respond = do
 -------------------------------------------------------------------------------
 
 serverApp :: ServerSettings -> Application
-serverApp ServerSettings{..} request respond
-    -- POST, let the router app handle it
-  | requestMethod request == methodPost =
-      jsonRPCRouterApp ssLogger routerMap request respond
-    -- GET, let the static file server app handle it
-  | requestMethod request == methodGet =
-      staticApp staticServerSettings request respond
-
-  | otherwise = respond $ mkHTTPErrorResp status405 -- method not allowed
+serverApp ServerSettings{..} request respond =
+  appDispatcher wrappedRespond
 
   where
     routerMap = mkRouteMap ssRPCRoutes
@@ -215,6 +208,19 @@ serverApp ServerSettings{..} request respond
     staticServerSettings = defaultFileServerSettings ssRootFolder
 
     mkHTTPErrorResp status = responseLBS status [] BL.empty
+
+    appDispatcher respond'
+      -- POST, let the router app handle it
+      | requestMethod request == methodPost =
+          jsonRPCRouterApp ssLogger routerMap request respond'
+      -- GET, let the static file server app handle it
+      | requestMethod request == methodGet =
+          staticApp staticServerSettings request respond'
+      | otherwise = respond $ mkHTTPErrorResp status405 -- method not allowed
+
+    wrappedRespond response = do
+      logL ssLogger INFO "TODO access log"
+      respond response
 
 runServer :: ServerSettings -> IO ()
 runServer settings@ServerSettings{..} = do
