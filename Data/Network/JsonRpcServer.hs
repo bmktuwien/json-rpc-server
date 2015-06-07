@@ -7,6 +7,7 @@ import           Control.Monad
 import           Data.Aeson
 import           Data.Aeson.Types
 import qualified Data.ByteString.Lazy           as BL
+import qualified Data.ByteString.Lazy.Char8     as BL8
 import qualified Data.HashMap.Strict            as HM
 import qualified Data.Text                      as T
 import qualified Data.Text.Encoding             as T
@@ -14,14 +15,16 @@ import           Network.HTTP.Types
 import           Network.Wai
 import           Network.Wai.Application.Static
 import           Network.Wai.Handler.Warp       (defaultSettings, runSettings,
-                                                 setOnClose, setOnException,
-                                                 setOnOpen, setPort)
+                                                 setBeforeMainLoop, setOnClose,
+                                                 setOnException, setPort)
 import           System.IO
 import           System.Log.Formatter           (simpleLogFormatter)
 import           System.Log.Handler             (setFormatter)
 import           System.Log.Handler.Simple      (fileHandler, streamHandler)
 import           System.Log.Logger              (Logger, Priority (..),
-                                                 addHandler, getLogger, logL)
+                                                 getLogger, logL, removeHandler,
+                                                 rootLoggerName, setHandlers,
+                                                 setLevel, updateGlobalLogger)
 import           Text.Printf                    (printf)
 
 data JsonRpcRequest = JsonRpcRequest
@@ -57,16 +60,17 @@ instance FromJSON JsonRpcRequest where
     method  <- v .:  "method"
     params  <- v .:? "params" .!= emptyObject
 
-    unless (isValidJsonRpcVer jver) mzero
+    unless (isValidJsonRpcVer jver) $
+      fail "Invalid JSON RPC version"
 
     case params of
       (Array _)  -> return ()
       (Object _) -> return ()
-      _          -> mzero
+      _          -> fail "Invalid parameter object"
 
     return $ JsonRpcRequest jid jver method params
 
-  parseJSON _ = mzero
+  parseJSON _ = fail "Top level container is not an object"
 
 instance (FromJSON r) => FromJSON (JsonRpcResponse r) where
   parseJSON (Object v) = parseResult `mplus` parseError
@@ -76,7 +80,8 @@ instance (FromJSON r) => FromJSON (JsonRpcResponse r) where
         jid    <- v .: "id"
         result <- v .: "result"
 
-        unless (isValidJsonRpcVer jver) mzero
+        unless (isValidJsonRpcVer jver) $
+          fail "Invalid JSON RPC version"
 
         return $ JsonRpcResult jid jver result
 
@@ -88,7 +93,8 @@ instance (FromJSON r) => FromJSON (JsonRpcResponse r) where
         errorMessage <- errorObj .: "message"
         errorData    <- errorObj .:? "data" .!= Null
 
-        unless (isValidJsonRpcVer jver) mzero
+        unless (isValidJsonRpcVer jver) $
+          fail "Invalid JSON RPC version"
 
         return $ JsonRpcError jid jver errorCode errorMessage errorData
 
@@ -159,7 +165,7 @@ jsonRPCRouterApp logger routeMap request respond = do
   case eitherDecode' . BL.fromStrict $ reqBody of
    Left err -> do
      logL logger ERROR $
-        printf "JSON RPC request parse error:  %s\n" err
+        printf "JSON RPC request parse error:  %s" err
      respond $ mkHTTPErrorResp status400
    Right rpcReq@JsonRpcRequest{..} -> do
      let endpoint = T.decodeUtf8 $ rawPathInfo request
@@ -177,14 +183,17 @@ jsonRPCRouterApp logger routeMap request respond = do
 
     logRPCAction endpoint JsonRpcRequest{..} JsonRpcResult{..} =
       logL logger INFO $
-      printf "JSON RPC id=%s endpoint=%s method=%s params=%s result=%s\n"
-      (show jrReqId) (show endpoint) (show jrReqMethod) (show jrResResult)
+      printf "JSON RPC: id=%s endpoint=%s method=%s params=%s result=%s"
+      (showJson jrReqId) (T.unpack endpoint) (T.unpack jrReqMethod)
+      (showJson jrReqParams) (showJson jrResResult)
 
     logRPCAction endpoint JsonRpcRequest{..} JsonRpcError{..} =
       logL logger INFO $
-      printf "JSON RPC id=%s endpoint=%s method=%s params=%s error=(%d,%s)\n"
-      (show jrReqId) (show endpoint) (show jrReqMethod) jrErrCode
-      (show jrErrMessage)
+      printf "JSON RPC: id=%s endpoint=%s method=%s params=%s error=(%d, %s)"
+      (showJson jrReqId) (T.unpack endpoint) (T.unpack jrReqMethod)
+      (showJson jrReqParams) jrErrCode (show jrErrMessage)
+
+    showJson = BL8.unpack . encode
 
 -------------------------------------------------------------------------------
 -------------------------------------------------------------------------------
@@ -194,7 +203,7 @@ serverApp ServerSettings{..} request respond
     -- POST, let the router app handle it
   | requestMethod request == methodPost =
       jsonRPCRouterApp ssLogger routerMap request respond
-    -- GET, let the static file server handle it
+    -- GET, let the static file server app handle it
   | requestMethod request == methodGet =
       staticApp staticServerSettings request respond
 
@@ -208,34 +217,33 @@ serverApp ServerSettings{..} request respond
     mkHTTPErrorResp status = responseLBS status [] BL.empty
 
 runServer :: ServerSettings -> IO ()
-runServer settings@ServerSettings{..} =
+runServer settings@ServerSettings{..} = do
+  -- remove root logger's default handler
+  updateGlobalLogger rootLoggerName removeHandler
+
   runSettings warpSettings $ serverApp settings
 
   where
     warpSettings = setPort ssPort .
-                   setOnOpen onOpen .
+                   setBeforeMainLoop beforeMain .
                    setOnClose onClose .
                    setOnException onException' $
                    defaultSettings
 
-    onOpen _ = do
+    beforeMain =
       logL ssLogger INFO $
-        printf "Server started listening on port %d...\n" ssPort
-
-      return True
+        printf "Server started listening on port %d" ssPort
 
     onClose sockAddr =
       logL ssLogger DEBUG $
-        printf "Connection from %s closed\n" (show sockAddr)
+        printf "Connection from %s closed" (show sockAddr)
 
     onException' (Just req) exception =
       logL ssLogger ERROR $
-        printf "Server error when serving the request %s: %s\n"
+        printf "Server error when serving the request %s: %s"
         (show req) (show exception)
 
-    onException' Nothing exception =
-      logL ssLogger ERROR $
-        printf "Server error: %s\n" (show exception)
+    onException' _ _ = return ()
 
 -------------------------------------------------------------------------------
 -------------------------------------------------------------------------------
@@ -250,4 +258,6 @@ mkLogger loggerType prio = do
 
   let formatter = simpleLogFormatter "$time [$prio] $msg"
 
-  return $ addHandler (setFormatter handler formatter) logger
+  return $ setHandlers [setFormatter handler formatter] .
+           setLevel prio $
+           logger
