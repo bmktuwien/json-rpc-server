@@ -29,12 +29,7 @@ data JsonRpcRequest = JsonRpcRequest
   , jrReqVer    :: !Value
   , jrReqMethod :: !T.Text
   , jrReqParams :: !Value
-  }
-
-instance Show JsonRpcRequest where
-  show JsonRpcRequest{..} =
-    printf "JSON RPC Request [%s]: %s %s"
-    (show jrReqId) (show jrReqMethod) (show jrReqParams)
+  } deriving (Show)
 
 data JsonRpcResponse r =
     JsonRpcResult { jrResId     :: !Value
@@ -48,14 +43,7 @@ data JsonRpcResponse r =
                   , jrErrData    :: !Value
                   }
 
-instance Show r => Show (JsonRpcResponse r) where
-  show JsonRpcResult{..} =
-    printf "JSON RPC Result [%s]: %s"
-    (show jrResId) (show jrResResult)
-
-  show JsonRpcError{..} =
-    printf "JSON RPC Error [%s]: %s(%d) %s"
-    (show jrErrId) (show jrErrMessage) (show jrErrCode) (show jrErrData)
+  deriving (Show)
 
 isValidJsonRpcVer :: Value -> Bool
 isValidJsonRpcVer (String "2.0") = True
@@ -134,18 +122,15 @@ instance ToJSON r => ToJSON (JsonRpcResponse r) where
 type JsonRPCFunc = Value -> JsonRpcResponse Value
 
 data JsonRPCRoute = JsonRPCRoute
-  { jrRouteDomain :: !T.Text
-  , jrRouteMethod :: !T.Text
-  , jrRouteFunc   :: JsonRPCFunc
+  { jrRouteEndpoint :: !T.Text
+  , jrRouteMethod   :: !T.Text
+  , jrRouteFunc     :: JsonRPCFunc
   }
 
 instance Show JsonRPCRoute where
   show JsonRPCRoute{..} =
-    concat [ "Domain: "
-           , T.unpack jrRouteDomain
-           , "Method: "
-           , T.unpack jrRouteMethod
-           ]
+    printf "JSON RPC Route: endpoint=%s method=%s"
+    (T.unpack jrRouteEndpoint) (T.unpack jrRouteMethod)
 
 type JsonRPCRouteMap = HM.HashMap (T.Text, T.Text) JsonRPCFunc
 
@@ -165,7 +150,7 @@ data ServerSettings = ServerSettings
 mkRouteMap :: [JsonRPCRoute] -> JsonRPCRouteMap
 mkRouteMap = HM.fromList . map f
   where
-    f JsonRPCRoute{..} = ((jrRouteDomain, jrRouteMethod), jrRouteFunc)
+    f JsonRPCRoute{..} = ((jrRouteEndpoint, jrRouteMethod), jrRouteFunc)
 
 jsonRPCRouterApp :: Logger -> JsonRPCRouteMap -> Application
 jsonRPCRouterApp logger routeMap request respond = do
@@ -177,20 +162,29 @@ jsonRPCRouterApp logger routeMap request respond = do
         printf "JSON RPC request parse error:  %s\n" err
      respond $ mkHTTPErrorResp status400
    Right rpcReq@JsonRpcRequest{..} -> do
-     logL logger DEBUG $ show rpcReq
-
-     let domain = T.decodeUtf8 $ rawPathInfo request
-         response = case HM.lookup (domain,jrReqMethod) routeMap of
+     let endpoint = T.decodeUtf8 $ rawPathInfo request
+         rpcRes = case HM.lookup (endpoint, jrReqMethod) routeMap of
            Just rpcFunc -> rpcFunc jrReqParams
            Nothing      -> JsonRpcError jrReqId jrReqVer (-32601)
                            "Method not found" Null
 
-     logL logger DEBUG $ show response
+     logRPCAction endpoint rpcReq rpcRes
 
-     respond . responseLBS status200 [] $ encode response
+     respond . responseLBS status200 [] $ encode rpcRes
 
   where
     mkHTTPErrorResp status = responseLBS status [] BL.empty
+
+    logRPCAction endpoint JsonRpcRequest{..} JsonRpcResult{..} =
+      logL logger INFO $
+      printf "JSON RPC id=%s endpoint=%s method=%s params=%s result=%s"
+      (show jrReqId) (show endpoint) (show jrReqMethod) (show jrResResult)
+
+    logRPCAction endpoint JsonRpcRequest{..} JsonRpcError{..} =
+      logL logger INFO $
+      printf "JSON RPC id=%s endpoint=%s method=%s params=%s error=(%d,%s)"
+      (show jrReqId) (show endpoint) (show jrReqMethod) jrErrCode
+      (show jrErrMessage)
 
 -------------------------------------------------------------------------------
 -------------------------------------------------------------------------------
